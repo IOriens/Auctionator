@@ -88,6 +88,7 @@ function Auctionator.DatabaseMixin:_SetPrice(dbKey, buyoutPrice, available)
       l={}, -- Lowest low price on a given day
       h={}, -- Highest low price on a given day
       a={}, -- Highest quantity seen on a given day
+      z={}, -- All Price History
       m=0   -- Last seen minimum price
     }
   end
@@ -127,6 +128,26 @@ function Auctionator.DatabaseMixin:_SetPrice(dbKey, buyoutPrice, available)
     end
   end
 
+  -- *** Begin Modification: Record in 'z' ***
+  local current_time = time()
+  local cutoff_time = current_time - (3 * 86400) -- 3 days in seconds
+
+  if not priceData.z then
+    priceData.z = {}
+  end
+
+  table.insert(priceData.z, {time = current_time, price = buyoutPrice, available = available or 0})
+
+  -- Prune old entries from 'z'
+  local new_z = {}
+  for _, record in ipairs(priceData.z) do
+    if record.time >= cutoff_time then
+      table.insert(new_z, record)
+    end
+  end
+  priceData.z = new_z
+  -- *** End Modification ***
+
   local cutoffDay = self.cutoffDay
 
   local daysToRemove = {}
@@ -164,13 +185,75 @@ end
 
 function Auctionator.DatabaseMixin:GetFirstPrice(dbKeys)
   for _, dbKey in ipairs(dbKeys) do
-    local price = self:GetPrice(dbKey)
-    if price then
-      return price
+    local itemData = self:_Get(dbKey)
+    
+    if itemData and itemData.z and #itemData.z > 0 then
+      -- Extract all prices from the 'z' field
+      local prices = {}
+      for _, record in ipairs(itemData.z) do
+        if type(record.price) == "number" then
+          table.insert(prices, record.price)
+        end
+      end
+      
+      if #prices == 0 then
+        -- If no valid prices in 'z', fallback to old logic
+        local price = self:GetPrice(dbKey)
+        if price then
+          return price
+        end
+      end
+
+      -- Sort prices in ascending order
+      table.sort(prices)
+      
+      -- Calculate median to determine a threshold for filtering
+      local count = #prices
+      local median
+      if count % 2 == 1 then
+        median = prices[math.floor(count / 2) + 1]
+      else
+        median = (prices[count / 2] + prices[count / 2 + 1]) / 2
+      end
+      
+      -- Define a threshold to filter out anomalously low prices
+      -- For example, exclude prices below 50% of the median
+      local threshold = median * 0.5
+      
+      -- Compute the average of prices that are above or equal to the threshold
+      local sum = 0
+      local validCount = 0
+      for _, price in ipairs(prices) do
+        if price >= threshold then
+          sum = sum + price
+          validCount = validCount + 1
+        end
+      end
+      
+      if validCount > 0 then
+        local averagePrice = math.floor(sum / validCount)
+        -- print("Average price: " .. averagePrice)
+        return averagePrice
+      else
+        -- If all prices are below the threshold, fallback to old logic
+        local price = self:GetPrice(dbKey)
+        if price then
+          return price
+        end
+      end
+    else
+      -- 'z' is empty or not present, use the original logic
+      local price = self:GetPrice(dbKey)
+      if price then
+        return price
+      end
     end
   end
+  
+  -- If no valid price is found in any of the dbKeys
   return nil
 end
+
 
 --Takes all the items with a list of their prices, and determines the minimum
 --price.
